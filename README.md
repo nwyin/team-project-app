@@ -21,6 +21,10 @@ uvx ty check
 
 ## VPS runbook
 
+**Deploying on Railway?** Follow `SETUP.md` instead — a guided walkthrough (Railway
+service + volume via the repo `Dockerfile`, plus every service token). The steps below
+are for a classic VPS with systemd and plain SSH.
+
 Any 1 vCPU / 1 GB box. No GPU — all inference is remote API calls.
 
 ### 1. hermes-agent
