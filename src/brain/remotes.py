@@ -12,6 +12,7 @@ from brain.mdblocks import blocks_to_md, md_to_blocks
 from brain.sync import RateLimited, RemoteItem
 
 NOTION_VERSION = "2026-03-11"
+MAX_BLOCKS_PER_REQUEST = 100  # Notion caps block children per request
 DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive"]  # full drive: must see files humans drop in
 MD_MIME = "text/markdown"
 GDOC_MIME = "application/vnd.google-apps.document"
@@ -57,14 +58,17 @@ class NotionRemote:
                 return blocks_to_md(blocks)
             cursor = resp["next_cursor"]
 
-    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str]:
+    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str, list[str]]:
+        # Full listing every sync (ponytail: fine at note scale — 1 request/100 pages). The
+        # query silently omits trashed/moved-out pages, so the id listing is the only delete
+        # signal; the engine reconciles against it. Bodies are fetched only for pages edited
+        # since cursor-1min (last_edited_time is minute-rounded; engine dedupes echoes by hash).
         ds_id = self._data_source_id(target_id)
+        since = (parse_ts(cursor) - timedelta(minutes=1)) if cursor else None
         query: dict[str, Any] = {"sorts": [{"timestamp": "last_edited_time", "direction": "ascending"}]}
-        if cursor:
-            # last_edited_time is minute-rounded -> overlap 1 minute; engine dedupes by hash
-            since = (parse_ts(cursor) - timedelta(minutes=1)).isoformat()
-            query["filter"] = {"timestamp": "last_edited_time", "last_edited_time": {"on_or_after": since}}
-        items, start_cursor = [], None
+        items: list[RemoteItem] = []
+        present: list[str] = []
+        start_cursor = None
         new_cursor = cursor or datetime.now(UTC).isoformat()
         while True:
             resp: Any = self._wrap(
@@ -74,32 +78,48 @@ class NotionRemote:
                 body={**query, "start_cursor": start_cursor} if start_cursor else query,
             )
             for page in resp["results"]:
+                present.append(page["id"])
                 edited = page["last_edited_time"]
-                items.append(
-                    RemoteItem(
-                        remote_id=page["id"],
-                        title=self._page_title(page),
-                        body_md=self._page_body(page["id"]),
-                        updated_at=edited,
-                        trashed=page.get("in_trash", False),
+                if since is None or parse_ts(edited) >= since:
+                    items.append(
+                        RemoteItem(
+                            remote_id=page["id"],
+                            title=self._page_title(page),
+                            body_md=self._page_body(page["id"]),
+                            updated_at=edited,
+                            trashed=page.get("in_trash", False),
+                        )
                     )
-                )
                 if parse_ts(edited) > parse_ts(new_cursor):
                     new_cursor = edited
             if not resp["has_more"]:
-                return items, new_cursor
+                return items, new_cursor, present
             start_cursor = resp["next_cursor"]
-        # ponytail: trashed pages drop out of the default query, so remote deletes surface only via
-        # in_trash on direct fetch; if remote-delete propagation matters, add a periodic full compare
+
+    def fetch(self, remote_id: str) -> RemoteItem:
+        page: Any = self._wrap(self.api.pages.retrieve, page_id=remote_id)
+        return RemoteItem(
+            remote_id=page["id"],
+            title=self._page_title(page),
+            body_md=self._page_body(page["id"]),
+            updated_at=page["last_edited_time"],
+            trashed=page.get("in_trash", False),
+        )
+
+    def _append_blocks(self, page_id: str, blocks: list[dict]) -> None:
+        for start in range(0, len(blocks), MAX_BLOCKS_PER_REQUEST):
+            self._wrap(self.api.blocks.children.append, block_id=page_id, children=blocks[start : start + MAX_BLOCKS_PER_REQUEST])
 
     def create(self, target_id: str, title: str, body_md: str) -> RemoteItem:
         ds_id = self._data_source_id(target_id)
+        blocks = md_to_blocks(body_md)
         page: Any = self._wrap(
             self.api.pages.create,
             parent={"data_source_id": ds_id},
             properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}},
-            children=md_to_blocks(body_md)[:1000],
+            children=blocks[:MAX_BLOCKS_PER_REQUEST],
         )
+        self._append_blocks(page["id"], blocks[MAX_BLOCKS_PER_REQUEST:])
         return RemoteItem(remote_id=page["id"], title=title, body_md=body_md, updated_at=page["last_edited_time"])
 
     def update(self, remote_id: str, title: str, body_md: str) -> RemoteItem:
@@ -107,10 +127,13 @@ class NotionRemote:
             self.api.pages.update, page_id=remote_id, properties={"title": {"title": [{"type": "text", "text": {"content": title}}]}}
         )
         # ponytail: replace-all body update (delete old blocks, append new); fine at note scale
-        existing: Any = self._wrap(self.api.blocks.children.list, block_id=remote_id, page_size=100)
-        for block in existing["results"]:
-            self._wrap(self.api.blocks.delete, block_id=block["id"])
-        self._wrap(self.api.blocks.children.append, block_id=remote_id, children=md_to_blocks(body_md)[:1000])
+        while True:
+            existing: Any = self._wrap(self.api.blocks.children.list, block_id=remote_id, page_size=100)
+            for block in existing["results"]:
+                self._wrap(self.api.blocks.delete, block_id=block["id"])
+            if not existing["has_more"]:
+                break
+        self._append_blocks(remote_id, md_to_blocks(body_md))
         return RemoteItem(remote_id=remote_id, title=title, body_md=body_md, updated_at=page["last_edited_time"])
 
     def delete(self, remote_id: str) -> None:
@@ -154,7 +177,8 @@ class DriveRemote:
         title = meta["name"].removesuffix(".md")
         return RemoteItem(remote_id=meta["id"], title=title, body_md=body, updated_at=meta["modifiedTime"])
 
-    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str]:
+    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str, None]:
+        # Returns None for present-ids: the changes feed already reports deletes/trashes.
         fields = "id, name, mimeType, md5Checksum, modifiedTime, trashed, parents"
         items = []
         if cursor is None:  # initial import: files.list on the folder; changes feed from now on
@@ -169,7 +193,7 @@ class DriveRemote:
                 items.extend(self._to_item(meta) for meta in resp.get("files", []))
                 page_token = resp.get("nextPageToken")
                 if not page_token:
-                    return items, token
+                    return items, token, None
         token = cursor
         while True:
             resp = self._execute(
@@ -183,7 +207,11 @@ class DriveRemote:
                     items.append(self._to_item(meta))
             token = resp.get("nextPageToken") or resp["newStartPageToken"]
             if "newStartPageToken" in resp:
-                return items, token
+                return items, token, None
+
+    def fetch(self, remote_id: str) -> RemoteItem:
+        meta = self._execute(self.api.files().get(fileId=remote_id, fields="id, name, mimeType, md5Checksum, modifiedTime, trashed"))
+        return self._to_item(meta, trashed=meta.get("trashed", False))
 
     def _media(self, body_md: str) -> Any:
         from googleapiclient.http import MediaIoBaseUpload

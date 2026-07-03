@@ -23,9 +23,17 @@ class RemoteItem:
 class SyncClient(Protocol):
     provider: str
 
-    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str]:
-        """Changes since cursor (everything on first sync) plus the new cursor.
-        Notion: last_edited_time query with 1-minute overlap. Drive: changes.list page token."""
+    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str, list[str] | None]:
+        """Changes since cursor (everything on first sync), the new cursor, and — if the
+        provider can enumerate the target cheaply — ALL remote ids currently present.
+        Notion returns the full id listing (its query silently drops trashed/moved-out pages,
+        so absence is the only delete signal); Drive returns None (its changes feed already
+        reports deletes)."""
+        ...
+
+    def fetch(self, remote_id: str) -> RemoteItem:
+        """Fetch one item by id — used for pages that are present but predate the cursor
+        (e.g. an old page moved into the database without a fresh edit)."""
         ...
 
     def create(self, target_id: str, title: str, body_md: str) -> RemoteItem: ...
@@ -56,13 +64,31 @@ def sync_provider(conn: sqlite3.Connection, client: SyncClient) -> dict:
     stats = {"pulled": 0, "pushed": 0, "archived": 0, "deleted": 0}
     targets = conn.execute("SELECT * FROM sync_targets WHERE provider = ?", (client.provider,)).fetchall()
     for target in targets:
-        changes, new_cursor = call_with_retry(client.list_changes, target["remote_id"], target["cursor"])
+        changes, new_cursor, present = call_with_retry(client.list_changes, target["remote_id"], target["cursor"])
         for remote in changes:
             _apply_remote(conn, client.provider, target["space_id"], remote, stats)
+        if present is not None:
+            _reconcile_presence(conn, client, target["space_id"], set(present), {r.remote_id for r in changes}, stats)
         _push_local(conn, client, target["space_id"], target["remote_id"], stats)
         conn.execute("UPDATE sync_targets SET cursor = ? WHERE id = ?", (new_cursor, target["id"]))
         conn.commit()
     return stats
+
+
+def _reconcile_presence(conn: sqlite3.Connection, client: SyncClient, space_id: int, present: set[str], changed: set[str], stats: dict) -> None:
+    """Two-way repair against the full remote listing: mapped ids that vanished remotely
+    are archived locally; present ids we've never mapped (and that didn't surface as
+    changes, e.g. old pages moved in) are fetched and ingested."""
+    mapped = conn.execute(
+        "SELECT m.remote_id FROM item_remote m JOIN items i ON i.id = m.item_id WHERE m.provider = ? AND i.space_id = ?",
+        (client.provider, space_id),
+    ).fetchall()
+    for row in mapped:
+        if row["remote_id"] not in present:
+            _apply_remote(conn, client.provider, space_id, RemoteItem(row["remote_id"], "", "", "", trashed=True), stats)
+    for remote_id in present - changed:
+        if _mapping(conn, client.provider, remote_id) is None:
+            _apply_remote(conn, client.provider, space_id, call_with_retry(client.fetch, remote_id), stats)
 
 
 def _mapping(conn: sqlite3.Connection, provider: str, remote_id: str) -> sqlite3.Row | None:

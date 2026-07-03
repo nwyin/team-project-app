@@ -32,6 +32,11 @@ class FakeRemote:
         item = self._find(remote_id)
         item.trashed, item.updated_at = True, updated_at
 
+    def vanish(self, remote_id: str) -> None:
+        """Drop an item with no change event — how Notion's query hides trashed/moved-out pages."""
+        for items in self.targets.values():
+            items.pop(remote_id, None)
+
     def _find(self, remote_id: str) -> RemoteItem:
         for items in self.targets.values():
             if remote_id in items:
@@ -48,7 +53,12 @@ class FakeRemote:
         self._maybe_fail()
         items = [i for i in self.targets.get(target_id, {}).values() if cursor is None or i.updated_at > cursor]
         timestamps = [i.updated_at for i in self.targets.get(target_id, {}).values()]
-        return list(items), max([cursor or self.now, *timestamps])
+        present = [i.remote_id for i in self.targets.get(target_id, {}).values() if not i.trashed]
+        return list(items), max([cursor or self.now, *timestamps]), present
+
+    def fetch(self, remote_id: str) -> RemoteItem:
+        self._maybe_fail()
+        return self._find(remote_id)
 
     def create(self, target_id: str, title: str, body_md: str) -> RemoteItem:
         self._maybe_fail()
@@ -168,6 +178,29 @@ def test_personal_items_never_reach_other_spaces_target(conn, fake):
     assert shared_titles == {"public"}
     alice_titles = {i.title for i in fake.targets.get("db-alice", {}).values()}
     assert alice_titles == {"private"}
+
+
+def test_silently_vanished_remote_page_archives_locally(conn, fake):
+    """Notion's query omits trashed/moved-out pages with no change event — absence from the
+    full listing must archive the local item."""
+    fake.seed("db-alice", "n1", "quietly removed", "body", T0)
+    sync_provider(conn, fake)
+    fake.vanish("n1")
+    stats = sync_provider(conn, fake)
+    assert stats["archived"] == 1
+    items = repo.list_items(conn, "alice", include_archived=True)
+    assert [r["archived"] for r in items if r["title"] == "quietly removed"] == [1]
+
+
+def test_page_moved_in_with_old_timestamp_still_syncs(conn, fake):
+    """A page moved into the database keeps its old last_edited_time (before the cursor) —
+    it must be fetched via the presence listing, not missed."""
+    repo.add_item(conn, "alice", title="existing", body="x")
+    sync_provider(conn, fake)  # establishes a cursor at T0
+    fake.seed("db-alice", "old-page", "moved in", "content from long ago", "2026-07-03T01:00:00+00:00")
+    stats = sync_provider(conn, fake)
+    assert stats["pulled"] == 1
+    assert "moved in" in {r["title"] for r in repo.list_items(conn, "alice")}
 
 
 def test_sync_retries_on_rate_limit(conn, fake):

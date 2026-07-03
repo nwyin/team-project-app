@@ -33,8 +33,9 @@ UI click-paths drift — if a menu isn't where this says, it moved, not disappea
    `nousresearch/hermes-agent` + the `brain` CLI baked in).
 2. **[you]** Service → **Settings**:
    - **Restart policy**: `Always` (Hobby+ only; default `On Failure` gives up after 10 crashes).
-   - **Custom start command**: `gateway run` (foreground gateway — the container's s6 init
-     supervises it; do NOT use `hermes gateway install`, there's no systemd in a container).
+   - **Custom start command**: leave empty — the Dockerfile's `CMD ["gateway", "run"]` runs
+     the gateway in the foreground under the container's s6 init. (Never `hermes gateway
+     install`; there's no systemd in a container.)
    - **Networking**: no public domain, no TCP proxy — the gateway makes outbound calls only.
      Leave **App sleeping / serverless OFF** (it's opt-in; a sleeping gateway is a dead bot).
 3. **[you]** Service → **Volume** (right-click service → Attach volume): mount path
