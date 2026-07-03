@@ -1,0 +1,17 @@
+# Copy to config.toml in BRAIN_DIR (default: the directory you run `brain` from).
+
+# Trusted users; `brain migrate` seeds personal:<user> spaces + shared from this list.
+users = ["alice", "bob"]
+
+[embeddings]
+# Any litellm-supported embedding model; api_base optional (e.g. an OpenRouter or local endpoint).
+model = "openai/text-embedding-3-small"
+# api_base = "https://openrouter.ai/api/v1"
+
+[notion]
+# Internal integration token (ntn_...). Share each space's database with the integration.
+token = "ntn_your_token_here"
+
+[drive]
+# OAuth user token JSON, relative to BRAIN_DIR. See README for the one-time consent flow.
+token_path = "drive-token.json"

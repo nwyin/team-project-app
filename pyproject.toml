@@ -1,0 +1,32 @@
+[project]
+name = "brain"
+version = "0.1.0"
+description = "Second-brain CLI: SQLite source of truth + Notion/Drive sync, driven by hermes-agent"
+requires-python = ">=3.11"
+dependencies = [
+    "litellm>=1.0",
+    "notion-client>=2.0",
+    "google-api-python-client>=2.0",
+    "google-auth>=2.0",
+    "google-auth-oauthlib>=1.0",
+]
+
+[project.scripts]
+brain = "brain.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/brain"]
+
+[tool.ruff]
+line-length = 144
+target-version = "py311"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
