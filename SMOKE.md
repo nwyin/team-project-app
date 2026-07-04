@@ -15,7 +15,17 @@ integrations that tests fake.
 - [ ] **Drive sync**: drop a `.md` file into a synced folder, run `brain sync drive`;
       confirm it appears as an item. Edit the item locally, sync; confirm the file updated.
 - [ ] **Google Doc import**: create a native Google Doc in the folder, sync; confirm it
-      imports as a read-only markdown item.
+      imports as a read-only markdown item. Edit that item locally and sync again;
+      confirm the Doc is untouched (local edits to read-only imports stay local).
+- [ ] **Fan-out**: `brain item add` into a space with both targets, then
+      `brain sync notion && brain sync drive`; confirm the doc appears in the Notion
+      database AND the Drive folder. Edit it in Notion, sync both; confirm the Drive
+      copy updates too (DB is the hub).
+- [ ] **Move re-homing**: `brain item move` an item to another synced space, sync;
+      confirm it left the old space's Notion DB/Drive folder and appeared in the new one.
+- [ ] **Attachment upload**: capture an item with an image attachment, sync drive;
+      confirm `<item-id>-<filename>` appears in the space's Drive folder (once — resync
+      does not duplicate it).
 - [ ] **Weekly review**: trigger the weekly review job (`hermes cron list`, then trigger);
       confirm a digest arrives on Telegram and proposed triage waits for confirmation.
 - [ ] **Local harness**: from a laptop with `BRAIN_SSH_HOST` set, run

@@ -16,7 +16,11 @@ def content_hash(title: str, body: str) -> str:
 
 
 def seed(conn: sqlite3.Connection, config: dict) -> None:
-    """Idempotently create users from config.toml, personal:<user> spaces, and shared."""
+    """Idempotently create users from config.toml, personal:<user> spaces, and shared.
+
+    `users` may be a legacy list of names or a table of name -> {telegram: ...};
+    iterating either yields names, so the loop below handles both.
+    """
     users = config.get("users", [])
     conn.execute("INSERT OR IGNORE INTO spaces (name) VALUES ('shared')")
     for name in users:
@@ -144,11 +148,36 @@ def update_item(conn: sqlite3.Connection, item_id: int, title: str, body: str, u
     conn.execute("UPDATE items SET title = ?, body = ?, updated_at = ? WHERE id = ?", (title, body, updated_at or iso_now(), item_id))
 
 
+def edit_item(conn: sqlite3.Connection, user: str, item_id: int, title: str | None = None, body: str | None = None) -> None:
+    row = get_item(conn, user, item_id)
+    record_history(conn, item_id, row["title"], row["body"], row["updated_at"], "edited")
+    update_item(conn, item_id, title if title is not None else row["title"], body if body is not None else row["body"])
+    conn.commit()
+
+
+def move_item(conn: sqlite3.Connection, user: str, item_id: int, space: str) -> None:
+    row = get_item(conn, user, item_id)
+    sid = space_id(conn, space)
+    require_visible(conn, user, sid)
+    record_history(conn, item_id, row["title"], row["body"], row["updated_at"], "moved")
+    conn.execute("UPDATE items SET space_id = ?, updated_at = ? WHERE id = ?", (sid, iso_now(), item_id))
+    conn.commit()
+
+
 def archive_item(conn: sqlite3.Connection, user: str, item_id: int, reason: str = "archived") -> None:
     row = get_item(conn, user, item_id)
     record_history(conn, item_id, row["title"], row["body"], row["updated_at"], reason)
     conn.execute("UPDATE items SET archived = 1, updated_at = ? WHERE id = ?", (iso_now(), item_id))
     conn.commit()
+
+
+def list_users(conn: sqlite3.Connection, config: dict) -> list[dict]:
+    users_cfg = config.get("users", [])
+    telegram_by_name = users_cfg if isinstance(users_cfg, dict) else {}
+    return [
+        {"name": r["name"], "telegram": telegram_by_name.get(r["name"], {}).get("telegram", "")}
+        for r in conn.execute("SELECT name FROM users ORDER BY name")
+    ]
 
 
 def add_attachment(conn: sqlite3.Connection, user: str, item_id: int, path: Path, files_root: Path) -> str:

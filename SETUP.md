@@ -68,6 +68,18 @@ Pick one:
 railway variable set OPENROUTER_API_KEY=sk-or-v1-...   # or ANTHROPIC_API_KEY=sk-ant-...
 ```
 
+**Embeddings key (separate, required for search indexing)**: OpenRouter has no embeddings
+endpoint, so `brain index` needs its own key for the embeddings model in `config.toml`
+(default `openai/text-embedding-3-small` → an OpenAI key from
+platform.openai.com/api-keys, prepaid credits; a few dollars lasts years at note volume):
+
+```bash
+railway variable set OPENAI_API_KEY=sk-...
+```
+
+If you'd rather not add a second provider, any litellm-supported embeddings model works —
+set `[embeddings] model` (and its key env var) accordingly.
+
 ## 3. Telegram bot [you + terminal]
 
 1. **[you]** In Telegram, message **@BotFather** (the verified one) → `/newbot` →
@@ -107,14 +119,20 @@ set in Railway override `.env` values, so tokens stay in Railway variables.
 
 ## 5. brain init [terminal]
 
+The `telegram` values are the numeric IDs from step 3 — the skill uses them to map a
+Telegram sender to their brain user.
+
 ```bash
 railway ssh -- mkdir -p /opt/data/brain
 cat <<'EOF' | railway ssh -- bash -c 'cat > /opt/data/brain/config.toml'
-users = ["alice", "bob"]
+[users.alice]
+telegram = "111111111"
+
+[users.bob]
+telegram = "222222222"
 
 [embeddings]
 model = "openai/text-embedding-3-small"
-# api_base = "https://openrouter.ai/api/v1"
 
 [notion]
 token = "REPLACED-IN-STEP-6"

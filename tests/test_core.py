@@ -54,3 +54,55 @@ def test_attachments(conn, tmp_path):
 def test_untitled_item_takes_title_from_body(conn):
     item = repo.add_item(conn, "alice", body="first line becomes title\nrest of body")
     assert repo.get_item(conn, "alice", item)["title"] == "first line becomes title"
+
+
+def test_seed_accepts_dict_form_users(conn):
+    repo.seed(conn, {"users": {"alice": {"telegram": "111"}, "bob": {"telegram": "222"}}})
+    assert {s["name"] for s in repo.list_spaces(conn)} == {"personal:alice", "personal:bob", "shared"}
+
+
+def test_edit_item_records_history_and_updates_body(conn):
+    item = repo.add_item(conn, "alice", title="orig", body="orig body")
+    before = repo.get_item(conn, "alice", item)["updated_at"]
+    repo.edit_item(conn, "alice", item, body="new body")
+    row = repo.get_item(conn, "alice", item)
+    assert row["title"] == "orig" and row["body"] == "new body"
+    assert row["updated_at"] >= before
+    history = conn.execute("SELECT * FROM item_history WHERE item_id = ?", (item,)).fetchall()
+    assert len(history) == 1 and history[0]["body"] == "orig body" and history[0]["reason"] == "edited"
+    hits = conn.execute("SELECT rowid FROM items_fts WHERE items_fts MATCH 'new'").fetchall()
+    assert item in {r["rowid"] for r in hits}
+
+
+def test_edit_item_by_non_member_raises(conn):
+    item = repo.add_item(conn, "alice", title="secret")
+    with pytest.raises(SystemExit):
+        repo.edit_item(conn, "bob", item, body="hacked")
+
+
+def test_move_item_changes_space_and_records_history(conn):
+    item = repo.add_item(conn, "alice", space="shared", title="promote me")
+    repo.move_item(conn, "alice", item, "personal:alice")
+    row = repo.get_item(conn, "alice", item)
+    assert row["space_id"] == repo.space_id(conn, "personal:alice")
+    history = conn.execute("SELECT * FROM item_history WHERE item_id = ?", (item,)).fetchall()
+    assert len(history) == 1 and history[0]["reason"] == "moved"
+
+
+def test_move_item_to_space_bob_cannot_see_raises(conn):
+    repo.add_space(conn, "project-x", members=["alice"])
+    item = repo.add_item(conn, "alice", space="shared", title="plan")  # bob can see the item, not the destination
+    with pytest.raises(SystemExit):
+        repo.move_item(conn, "bob", item, "project-x")
+
+
+def test_list_users(conn):
+    repo.seed(conn, {"users": {"alice": {"telegram": "111"}, "bob": {"telegram": "222"}}})
+    assert repo.list_users(conn, {"users": {"alice": {"telegram": "111"}, "bob": {"telegram": "222"}}}) == [
+        {"name": "alice", "telegram": "111"},
+        {"name": "bob", "telegram": "222"},
+    ]
+    assert repo.list_users(conn, {"users": ["alice", "bob"]}) == [
+        {"name": "alice", "telegram": ""},
+        {"name": "bob", "telegram": ""},
+    ]

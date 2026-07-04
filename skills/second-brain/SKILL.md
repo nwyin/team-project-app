@@ -21,10 +21,14 @@ ssh $BRAIN_SSH_HOST brain search "standing desk research" --user alice
 
 Every read/write takes `--user <name>`. Resolve it from who is talking:
 
-- Telegram: map the sender's Telegram identity to their configured user name.
+- Telegram: run `brain user list` and match the sender's Telegram id/handle to a name.
 - Local harness: the machine's owner, from local config.
 
-Never guess. If you cannot resolve the user, ask.
+```
+brain user list
+```
+
+Never guess. If you cannot find a match, ask.
 
 ## Spaces and RBAC conventions
 
@@ -53,6 +57,15 @@ Long body from a file or heredoc goes through stdin:
 
 ```
 brain item add --user alice --title "Meeting notes" --body -
+```
+
+## Editing items
+
+Fix a mistake or add detail to an existing item without losing history (the old
+version is recorded in `item_history`):
+
+```
+brain item edit 42 --user alice --body "corrected text"
 ```
 
 ## Workflow: Q&A
@@ -94,11 +107,22 @@ brain item add --user alice --kind draft --title "Newsletter: what a month of st
 
 ```
 brain item list --user alice --space personal:alice
-brain item archive 42 --user alice
-brain item add --user alice --space shared --title "Promoted from inbox" --body "content of the promoted item"
+brain item move 42 --user alice --space shared
+brain item archive 17 --user alice
 ```
 
 4. Summarize the week: new items, open questions, suggested follow-ups.
+
+## Making a write show up immediately
+
+Sync to Notion/Drive normally runs on a 15-minute cron. If the user is waiting to
+see a write ("save this and share it", "add this to the doc"), sync right after:
+
+```
+brain item add --user alice --space shared --title "Q3 roadmap" --body - && brain sync notion && brain sync drive
+```
+
+This is optional — the cron covers it eventually either way.
 
 ## Maintenance commands (cron uses these; rarely needed interactively)
 

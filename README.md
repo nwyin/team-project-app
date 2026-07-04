@@ -46,10 +46,14 @@ hermes gateway start
 
 ```bash
 mkdir ~/brain && cd ~/brain
-cp /path/to/repo/config.example.toml config.toml   # set users, embeddings, tokens
+cp /path/to/repo/config.example.toml config.toml   # set users (+ telegram ids), embeddings, tokens
 uv tool install /path/to/repo                      # installs the `brain` command
 brain migrate                                      # creates brain.db, seeds users/spaces
 ```
+
+Embeddings need their provider's key in the environment (`OPENAI_API_KEY` for the default
+model — OpenRouter has no embeddings endpoint). On a VPS put it in `~/.hermes/.env` so the
+cron-run `brain index` sees it.
 
 Set `BRAIN_DIR=~/brain` in the environment cron and the agent run under (or always
 `cd ~/brain` first, as the cron job does).

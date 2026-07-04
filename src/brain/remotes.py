@@ -140,6 +140,7 @@ class NotionRemote:
         self._wrap(self.api.pages.update, page_id=remote_id, in_trash=True)
 
 
+# ponytail: attachment upload is Drive-only; NotionRemote intentionally has no upload_file hook.
 class DriveRemote:
     provider = "drive"
 
@@ -172,10 +173,12 @@ class DriveRemote:
         if meta["mimeType"] == GDOC_MIME:
             # native Docs: export as markdown, import read-only (we never write markdown back into a Doc)
             body = self._execute(self.api.files().export(fileId=meta["id"], mimeType=MD_MIME)).decode()
+            read_only = True
         else:
             body = self._execute(self.api.files().get_media(fileId=meta["id"])).decode()
+            read_only = False
         title = meta["name"].removesuffix(".md")
-        return RemoteItem(remote_id=meta["id"], title=title, body_md=body, updated_at=meta["modifiedTime"])
+        return RemoteItem(remote_id=meta["id"], title=title, body_md=body, updated_at=meta["modifiedTime"], read_only=read_only)
 
     def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str, None]:
         # Returns None for present-ids: the changes feed already reports deletes/trashes.
@@ -236,3 +239,15 @@ class DriveRemote:
 
     def delete(self, remote_id: str) -> None:
         self._execute(self.api.files().update(fileId=remote_id, body={"trashed": True}))
+
+    def upload_file(self, target_id: str, filename: str, data: bytes) -> str:
+        from googleapiclient.http import MediaIoBaseUpload
+
+        meta = self._execute(
+            self.api.files().create(
+                body={"name": filename, "parents": [target_id]},
+                media_body=MediaIoBaseUpload(io.BytesIO(data), mimetype="application/octet-stream"),
+                fields="id",
+            )
+        )
+        return meta["id"]

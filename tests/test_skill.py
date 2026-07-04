@@ -33,13 +33,21 @@ def brain_invocations(text: str) -> list[list[str]]:
 
 def test_every_skill_command_is_a_valid_cli_invocation():
     invocations = brain_invocations(SKILL.read_text())
-    assert len(invocations) >= 15, "skill should be full of concrete examples"
+    assert len(invocations) >= 20, "skill should be full of concrete examples"
     parser = build_parser()
     for argv in invocations:
         try:
             parser.parse_args(argv)
         except SystemExit:
             pytest.fail(f"SKILL.md contains an invalid CLI invocation: brain {' '.join(argv)}")
+
+
+def test_skill_covers_move_edit_and_user_list():
+    invocations = brain_invocations(SKILL.read_text())
+    subcommands = {tuple(argv[:2]) for argv in invocations}
+    assert ("item", "move") in subcommands
+    assert ("item", "edit") in subcommands
+    assert ("user", "list") in subcommands
 
 
 def test_skill_covers_all_five_workflows():

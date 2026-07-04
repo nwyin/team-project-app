@@ -1,5 +1,6 @@
 import pytest
 
+from brain.db import brain_dir
 from brain import repo
 from brain.sync import RateLimited, RemoteItem, call_with_retry, sync_provider
 
@@ -14,15 +15,17 @@ class FakeRemote:
 
     provider = "notion"
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.targets: dict[str, dict[str, RemoteItem]] = {}
         self.creates = self.updates = self.deletes = 0
+        self.uploads = 0
+        self.uploaded_files: list[tuple[str, str, bytes, str]] = []
         self.now = T0
         self.fail_next: int = 0
 
     # -- test helpers ------------------------------------------------------
-    def seed(self, target_id: str, remote_id: str, title: str, body: str, updated_at: str) -> None:
-        self.targets.setdefault(target_id, {})[remote_id] = RemoteItem(remote_id, title, body, updated_at)
+    def seed(self, target_id: str, remote_id: str, title: str, body: str, updated_at: str, read_only: bool = False) -> None:
+        self.targets.setdefault(target_id, {})[remote_id] = RemoteItem(remote_id, title, body, updated_at, read_only=read_only)
 
     def edit(self, remote_id: str, body: str, updated_at: str) -> None:
         item = self._find(remote_id)
@@ -49,7 +52,7 @@ class FakeRemote:
             raise RateLimited(0)
 
     # -- SyncClient protocol -----------------------------------------------
-    def list_changes(self, target_id: str, cursor: str | None):
+    def list_changes(self, target_id: str, cursor: str | None) -> tuple[list[RemoteItem], str, list[str]]:
         self._maybe_fail()
         items = [i for i in self.targets.get(target_id, {}).values() if cursor is None or i.updated_at > cursor]
         timestamps = [i.updated_at for i in self.targets.get(target_id, {}).values()]
@@ -80,6 +83,13 @@ class FakeRemote:
         self.deletes += 1
         self._find(remote_id).trashed = True
 
+    def upload_file(self, target_id: str, filename: str, data: bytes) -> str:
+        self._maybe_fail()
+        self.uploads += 1
+        remote_id = f"u{self.uploads}-{target_id}"
+        self.uploaded_files.append((target_id, filename, data, remote_id))
+        return remote_id
+
 
 @pytest.fixture
 def fake(conn):
@@ -107,10 +117,10 @@ def test_no_changes_makes_zero_write_calls(conn, fake):
     fake.seed("db-alice", "n1", "remote note", "body", T0)
     repo.add_item(conn, "alice", title="local note", body="hello")
     sync_provider(conn, fake)  # reach steady state
-    writes_before = (fake.creates, fake.updates, fake.deletes)
+    writes_before = (fake.creates, fake.updates, fake.deletes, fake.uploads)
     sync_provider(conn, fake)
     sync_provider(conn, fake)
-    assert (fake.creates, fake.updates, fake.deletes) == writes_before
+    assert (fake.creates, fake.updates, fake.deletes, fake.uploads) == writes_before
 
 
 def test_conflict_remote_newer_remote_wins_loser_in_history(conn, fake):
@@ -167,6 +177,95 @@ def test_local_archive_propagates_as_remote_delete(conn, fake):
     sync_provider(conn, fake)
     assert fake.deletes == 1
     assert all(i.trashed for i in fake.targets["db-alice"].values())
+
+
+def test_read_only_remote_item_never_pushes_or_deletes(conn, fake):
+    fake.seed("db-alice", "gdoc-1", "doc", "remote body", T0, read_only=True)
+    sync_provider(conn, fake)
+    item = repo.list_items(conn, "alice")[0]["id"]
+
+    repo.update_item(conn, item, "doc", "local edit", updated_at=T1)
+    sync_provider(conn, fake)
+    assert fake.updates == 0
+
+    repo.archive_item(conn, "alice", item)
+    sync_provider(conn, fake)
+    assert fake.deletes == 0
+
+
+def test_moved_item_rehomes_between_targets_in_one_sync(conn, fake):
+    repo.set_target(conn, "shared", "notion", "db-shared")
+    item = repo.add_item(conn, "alice", title="move me", body="shared now")
+    sync_provider(conn, fake)
+    creates_before = fake.creates
+    deletes_before = fake.deletes
+    shared_space_id = conn.execute("SELECT id FROM spaces WHERE name = ?", ("shared",)).fetchone()["id"]
+
+    conn.execute("UPDATE items SET space_id = ? WHERE id = ?", (shared_space_id, item))
+    stats = sync_provider(conn, fake)
+
+    assert fake.deletes - deletes_before == 1
+    assert fake.creates - creates_before == 1
+    assert stats["deleted"] == 1
+    assert all(i.trashed for i in fake.targets["db-alice"].values() if i.title == "move me")
+    assert {i.title for i in fake.targets["db-shared"].values() if not i.trashed} == {"move me"}
+    mapping = conn.execute("SELECT space_id FROM item_remote WHERE item_id = ? AND provider = ?", (item, fake.provider)).fetchone()
+    assert mapping["space_id"] == shared_space_id
+
+
+def test_attachments_upload_once_to_remote_with_optional_capability(conn, fake):
+    item = repo.add_item(conn, "alice", title="with file", body="body")
+    filename = "note.bin"
+    data = b"attachment bytes"
+    file_dir = brain_dir() / "files" / str(item)
+    file_dir.mkdir(parents=True)
+    (file_dir / filename).write_bytes(data)
+    conn.execute("INSERT INTO attachments (item_id, filename, sha256) VALUES (?, ?, ?)", (item, filename, "dummy"))
+
+    sync_provider(conn, fake)
+
+    assert fake.uploads == 1
+    assert fake.uploaded_files == [("db-alice", f"{item}-{filename}", data, "u1-db-alice")]
+    assert conn.execute("SELECT drive_file_id FROM attachments WHERE item_id = ?", (item,)).fetchone()["drive_file_id"] == "u1-db-alice"
+
+    sync_provider(conn, fake)
+    assert fake.uploads == 1
+
+
+def test_one_local_add_fans_out_to_both_notion_and_drive(conn, fake):
+    """The headline requirement: an agent adds one row locally and it appears in the
+    space's Notion database AND Drive folder; a later edit propagates to both too."""
+    drive = FakeRemote()
+    drive.provider = "drive"
+    repo.set_target(conn, "personal:alice", "drive", "folder-alice")
+
+    item = repo.add_item(conn, "alice", title="new doc", body="hello world")
+    sync_provider(conn, fake)
+    sync_provider(conn, drive)
+    assert {i.title for i in fake.targets["db-alice"].values()} == {"new doc"}
+    assert {i.title for i in drive.targets["folder-alice"].values()} == {"new doc"}
+
+    repo.edit_item(conn, "alice", item, body="hello world, revised")
+    sync_provider(conn, fake)
+    sync_provider(conn, drive)
+    assert [i.body_md for i in fake.targets["db-alice"].values()] == ["hello world, revised"]
+    assert [i.body_md for i in drive.targets["folder-alice"].values()] == ["hello world, revised"]
+
+
+def test_remote_notion_edit_relays_to_drive_via_db(conn, fake):
+    """Hub-and-spoke: an edit made in Notion lands locally, then the next Drive sync
+    pushes it out — the DB is the hub between the two remotes."""
+    drive = FakeRemote()
+    drive.provider = "drive"
+    repo.set_target(conn, "personal:alice", "drive", "folder-alice")
+    repo.add_item(conn, "alice", title="doc", body="v1")
+    sync_provider(conn, fake)
+    sync_provider(conn, drive)
+
+    fake.edit(next(iter(fake.targets["db-alice"])), "v2 from notion", updated_at=T1)
+    sync_provider(conn, fake)
+    sync_provider(conn, drive)
+    assert [i.body_md for i in drive.targets["folder-alice"].values()] == ["v2 from notion"]
 
 
 def test_personal_items_never_reach_other_spaces_target(conn, fake):

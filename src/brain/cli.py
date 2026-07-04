@@ -43,6 +43,19 @@ def build_parser() -> argparse.ArgumentParser:
     item_archive = item.add_parser("archive")
     item_archive.add_argument("id", type=int)
     item_archive.add_argument("--user", required=True)
+    item_edit = item.add_parser("edit")
+    item_edit.add_argument("id", type=int)
+    item_edit.add_argument("--user", required=True)
+    item_edit.add_argument("--title")
+    item_edit.add_argument("--body", help="new body text, or - to read stdin")
+    item_move = item.add_parser("move")
+    item_move.add_argument("id", type=int)
+    item_move.add_argument("--user", required=True)
+    item_move.add_argument("--space", required=True)
+
+    user = sub.add_parser("user", help="manage users").add_subparsers(dest="user_command", required=True)
+    user_list = user.add_parser("list")
+    user_list.add_argument("--json", action="store_true")
 
     search_cmd = sub.add_parser("search", help="hybrid FTS + vector search")
     search_cmd.add_argument("query")
@@ -107,6 +120,19 @@ def main(argv: list[str] | None = None) -> None:
         elif args.item_command == "archive":
             repo.archive_item(conn, args.user, args.id)
             print(f"archived {args.id}")
+        elif args.item_command == "edit":
+            if args.title is None and args.body is None:
+                raise SystemExit("give --title and/or --body")
+            body = sys.stdin.read() if args.body == "-" else args.body
+            repo.edit_item(conn, args.user, args.id, args.title, body)
+            print(f"edited {args.id}")
+        elif args.item_command == "move":
+            repo.move_item(conn, args.user, args.id, args.space)
+            print(f"moved {args.id} to {args.space}")
+
+    elif args.command == "user":
+        if args.user_command == "list":
+            _emit(repo.list_users(conn, config), as_json=args.json)
 
     elif args.command == "search":
         embedder = None
